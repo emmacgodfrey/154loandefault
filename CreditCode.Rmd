@@ -1,0 +1,126 @@
+---
+title: "Give me some credit - Code compilation"
+author: "Emma Godfrey"
+date: "10/26/2020"
+output: pdf_document
+---
+The code outline is as follows: 
+1. data cleaning, outlier detection, and imputation
+2. Balancing the dataset via minority oversampling and synthetic minority data generation
+3. XGBoost model generation and testing
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+cs.training <- read.csv("~/Downloads/cs-training.csv")
+cs.test <- read.csv("~/Downloads/cs-test.csv")
+
+library("tidyverse") 
+library("MASS")
+library("e1071")
+library("class")
+library("xgboost")
+library("outliers")
+library('EnvStats')
+library("ggstatsplot")
+library('randomForest')
+library('missForest')
+library('gapminder')
+library('mice')
+library('readr')
+library('sm')
+library("ROSE")
+library('rpart')
+library('rpart.plot')
+library("DiagrammeR")
+```
+
+
+```{r cleaning and imputation}
+# create indicator variables to show whether variable was imputed or not
+cs.training <- cs.training %>%
+  mutate(missing_income = ifelse(is.na(MonthlyIncome), 1, 0),
+         missing_dependents = ifelse(is.na(NumberOfDependents), 1, 0),
+         ninetyeight = ifelse(NumberOfTime30.59DaysPastDueNotWorse > 80, 1, 0),
+         debt.more.than.25000 = ifelse(DebtRatio>25000, 1,0),
+         creditlines.more.than.25 = ifelse(NumberOfOpenCreditLinesAndLoans > 25, 1, 0),
+         realestate.more.than.15 = ifelse(NumberRealEstateLoansOrLines > 15, 1, 0), 
+         revolving.more.than.1.5 = ifelse(RevolvingUtilizationOfUnsecuredLines > 1.5, 1, 0)
+         )
+
+# create indicator variables for the test data to show whether imputed or not 
+# cutoffs were decided via EDA and outlier detection
+cs.test <- cs.test %>% 
+   mutate(missing_income = ifelse(is.na(MonthlyIncome), 1, 0),
+         missing_dependents = ifelse(is.na(NumberOfDependents), 1, 0),
+         ninetyeight = ifelse(NumberOfTime30.59DaysPastDueNotWorse > 80, 1, 0),
+         debt.more.than.25000 = ifelse(DebtRatio>25000, 1,0),
+         creditlines.more.than.25 = ifelse(NumberOfOpenCreditLinesAndLoans > 25, 1, 0),
+         realestate.more.than.15 = ifelse(NumberRealEstateLoansOrLines > 15, 1, 0), 
+         revolving.more.than.1.5 = ifelse(RevolvingUtilizationOfUnsecuredLines > 1.5, 1, 0)
+         )
+
+# change outliers to NAs which we will impute later
+cs.training.impute <- cs.training %>%
+  mutate(RevolvingUtilizationOfUnsecuredLines = ifelse(RevolvingUtilizationOfUnsecuredLines>1.5, NA, RevolvingUtilizationOfUnsecuredLines),
+         NumberOfTime30.59DaysPastDueNotWorse = ifelse(NumberOfTime30.59DaysPastDueNotWorse>30, NA, NumberOfTime30.59DaysPastDueNotWorse), 
+         NumberOfTime60.89DaysPastDueNotWorse = ifelse(NumberOfTime60.89DaysPastDueNotWorse>30, NA, NumberOfTime60.89DaysPastDueNotWorse),
+         NumberOfTimes90DaysLate = ifelse(NumberOfTimes90DaysLate>30, NA, NumberOfTimes90DaysLate),
+         DebtRatio = ifelse(DebtRatio > 25000, NA, DebtRatio),
+         MonthlyIncome = ifelse(MonthlyIncome > 50000 | MonthlyIncome <600, NA, MonthlyIncome),
+         NumberOfOpenCreditLinesAndLoans = ifelse(NumberOfOpenCreditLinesAndLoans >25, NA, NumberOfOpenCreditLinesAndLoans),
+         NumberRealEstateLoansOrLines = ifelse(NumberRealEstateLoansOrLines >10, NA, NumberRealEstateLoansOrLines),
+         NumberOfDependents = ifelse(NumberOfDependents > 7, NA, NumberOfDependents)
+         )
+
+# change outliers to NA which we will later impute
+cs.test.impute <- cs.test %>% 
+    mutate(RevolvingUtilizationOfUnsecuredLines = ifelse(RevolvingUtilizationOfUnsecuredLines>1.5, NA, RevolvingUtilizationOfUnsecuredLines),
+         NumberOfTime30.59DaysPastDueNotWorse = ifelse(NumberOfTime30.59DaysPastDueNotWorse>30, NA, NumberOfTime30.59DaysPastDueNotWorse), 
+         NumberOfTime60.89DaysPastDueNotWorse = ifelse(NumberOfTime60.89DaysPastDueNotWorse>30, NA, NumberOfTime60.89DaysPastDueNotWorse),
+         NumberOfTimes90DaysLate = ifelse(NumberOfTimes90DaysLate>30, NA, NumberOfTimes90DaysLate),
+         DebtRatio = ifelse(DebtRatio > 25000, NA, DebtRatio),
+         MonthlyIncome = ifelse(MonthlyIncome > 50000 | MonthlyIncome <600, NA, MonthlyIncome),
+         NumberOfOpenCreditLinesAndLoans = ifelse(NumberOfOpenCreditLinesAndLoans >25, NA, NumberOfOpenCreditLinesAndLoans),
+         NumberRealEstateLoansOrLines = ifelse(NumberRealEstateLoansOrLines >10, NA, NumberRealEstateLoansOrLines),
+         NumberOfDependents = ifelse(NumberOfDependents > 7, NA, NumberOfDependents)
+         )
+
+# Overall indicator variable to show whether record was imputed 
+cs.training.impute <- cs.training.impute %>% 
+  mutate(imputed = ifelse(complete.cases(cs.training.impute), 0, 1))
+
+cs.test.impute <- cs.test.impute %>% 
+  mutate(imputed = ifelse(complete.cases(cs.test.impute), 0, 1))
+
+
+# looking at distribution of classes to determine MAR or MNAR
+imputed.yes <- cs.training.impute %>%
+  filter(imputed == 1) 
+imputed.no <- cs.training.impute %>% 
+  filter(imputed == 0)
+
+# MICE implementation -- takes ~1.5 hrs to run 
+cs.training1.impute <- mice(cs.training.impute, m=5, maxit=25, meth='pmm')
+complete.data <- complete(cs.training1.impute, 1)
+# z-scale the data
+complete.data[,3:12] <- apply(complete.data[,3:12],2, scale)
+
+
+# MICE implementation for test data
+cs.test1.impute <- mice(cs.test.impute, m=5, maxit=25, meth='pmm')
+# construct fully imputed dataset
+complete.test.imputed <- complete(cs.test1.impute, 1)
+# z-scale the imputed test dataset
+complete.test.imputed[,3:12] <- apply(complete.test.imputed[,3:12],2,scale)
+
+
+# create imputed testing and training data
+random.sample <- sample(nrow(complete.data), 0.8*nrow(complete.data), replace=FALSE)
+complete.training <- complete.data[random.sample,]
+complete.testing <- complete.data[-random.sample,]
+
+# check distribution of income post-imputation
+ggplot(complete.data, aes(x= MonthlyIncome)) + 
+  geom_histogram() +
+  ggtitle("Distribution of Scaled Monthly Income After MICE Implementation")
+```
