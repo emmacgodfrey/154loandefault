@@ -124,3 +124,177 @@ ggplot(complete.data, aes(x= MonthlyIncome)) +
   geom_histogram() +
   ggtitle("Distribution of Scaled Monthly Income After MICE Implementation")
 ```
+
+```{r balancing the dataset}
+
+par(mfrow=c(1,3))
+
+# synthetically generating minority data 
+data.rose <- ROSE(SeriousDlqin2yrs ~., data = complete.training, seed=1)$data
+# fit a classification tree to synthetically generated dataset
+treeimb <- rpart(data.rose$SeriousDlqin2yrs ~ ., data = data.rose)
+treeplot <- rpart.plot(treeimb, type =1, main = "SMOTE Balanced Data Classification Tree Model")
+pred.treeimb <- predict(treeimb, newdata = complete.testing)
+# check the ROC curve for learner prediction power
+roc.curve(complete.testing$SeriousDlqin2yrs, pred.treeimb, n.thresholds = 20)
+accuracy.meas(complete.testing$SeriousDlqin2yrs, pred.treeimb)
+
+# over sampling data and building classification tree 
+data.balanced.over <- ovun.sample(SeriousDlqin2yrs ~ ., data = complete.training, method = "over",N = 150000)$data
+tree.over <- rpart(data.balanced.over$SeriousDlqin2yrs ~., data = data.balanced.over)
+rpart.plot(tree.over, type = 1, main = "Oversampled Balanced Data Classification Tree Model")
+pred.tree.over <- predict(tree.over, newdata = complete.testing)
+roc.curve(complete.testing$SeriousDlqin2yrs, pred.tree.over)
+
+# unbalanced data, normal classification tree and plot for ROC curve 
+tree.normal <- rpart(complete.training$SeriousDlqin2yrs ~., data = complete.training)
+pred.tree.normal <- predict(tree.normal, newdata = complete.testing)
+rpart.plot(tree.normal, type = 1, main = "Imbalanced Data Classification Tree Model")
+roc.curve(complete.testing$SeriousDlqin2yrs, pred.tree.normal)
+
+
+# code to plot the importance plots for each classification tree 
+df <- data.frame(imp = tree.normal$variable.importance)
+df2 <- df %>% 
+  tibble::rownames_to_column() %>% 
+  dplyr::rename("variable" = rowname) %>% 
+  dplyr::arrange(imp) %>%
+  dplyr::mutate(variable = forcats::fct_inorder(variable))
+plot1 <- ggplot2::ggplot(df2) +
+  geom_col(aes(x = variable, y = imp),
+           col = "black", show.legend = F) +
+  coord_flip() +
+  scale_fill_grey() +
+  theme_bw() + 
+  ggtitle("Importance Plot for Classification Tree (Imbalanced)")
+
+df3 <- data.frame(imp = tree.over$variable.importance)
+df4 <- df %>% 
+  tibble::rownames_to_column() %>% 
+  dplyr::rename("variable" = rowname) %>% 
+  dplyr::arrange(imp) %>%
+  dplyr::mutate(variable = forcats::fct_inorder(variable))
+plot2 <- ggplot2::ggplot(df4) +
+  geom_col(aes(x = variable, y = imp),
+           col = "black", show.legend = F) +
+  coord_flip() +
+  scale_fill_grey() +
+  theme_bw() + 
+  ggtitle("Importance Plot for Classification Tree (Oversampling)")
+
+df5 <- data.frame(imp = treeimb$variable.importance)
+df6 <- df %>% 
+  tibble::rownames_to_column() %>% 
+  dplyr::rename("variable" = rowname) %>% 
+  dplyr::arrange(imp) %>%
+  dplyr::mutate(variable = forcats::fct_inorder(variable))
+plot3 <- ggplot2::ggplot(df6) +
+  geom_col(aes(x = variable, y = imp),
+           col = "black", show.legend = F) +
+  coord_flip() +
+  scale_fill_grey() +
+  theme_bw() + 
+  ggtitle("Importance Plot for Classification Tree (SMOTE)")
+
+```
+
+ 
+
+XGBoost Code. 
+```{r unbalanced xgboost model}
+# create unlabeled and only labels training data
+complete.training.nolables <- complete.training[,-2]
+complete.training.labels <- complete.training[,2]
+complete.testing.nolabels <- complete.testing[,-2]
+complete.testing.labels <- complete.testing[,2]
+
+# XGBoost requires the data to be in specific format
+complete.boost.train <- xgb.DMatrix(data=as.matrix(complete.training.nolables), label=as.matrix(complete.training.labels))
+
+complete.boost.test <- xgb.DMatrix(data= as.matrix(complete.testing.nolabels), label=as.matrix(complete.testing.labels))
+
+# to be used in balancing parameter in XGBoost 
+positive_cases <- sum(complete.training.labels == 1)
+negative_cases <- sum(complete.training.labels == 0)
+
+# parameters for XGBoost model
+params <- list(booster = "gbtree", objective = "binary:logistic", eta=0.3, gamma=0, max_depth=6, min_child_weight=1, subsample=1, colsample_bytree=1)
+
+# cv for nrounds -- best iteration = 16
+xgbcv <- xgb.cv( params = params, data = complete.boost.train, nrounds = 100, nfold = 5, showsd = T, stratified = T, print.every.n = 10, early.stop.round = 20, maximize = F)
+
+# run the full XGBoost model with cv nrounds 
+xgb.imputed.model <- xgboost(params = params, 
+                             data= complete.boost.train,
+                            nround = 16,
+                            scale_pos_weight = negative_cases/positive_cases)
+# We see minimal improvement from round 1 to round 2 
+# test our model on our training data
+testing <- predict(xgb.imputed.model, complete.boost.test)
+
+# plot ROC curve for XGBoost predictions 
+roc.curve(complete.testing$SeriousDlqin2yrs, testing, main = "Imbalanced Dataset: AUC = 0.861")
+
+```
+
+```{r}
+# looking inside the boosted tree 
+xgb.plot.tree(model = xgb.model, trees = 0:1)
+
+# constructing an importance plot for imblaanced XGB model
+importance1 <- xgb.importance(model = xgb.imputed.model)
+importance.plot <- xgb.plot.importance(importance1[1:8], main = "Imbalanced Dataset XGBoost Variable Importance", left_margin = 15, xlab = "Variable Importance" )
+```
+
+```{r more visualizations}
+
+# graph of predictions and truth at each point
+plot(complete.testing.nolabels$age, complete.testing.nolabels$DebtRatio, col = complete.testing.labels +1)
+points(complete.testing.nolabels$age, complete.testing.nolabels$DebtRatio, col = predictions+1, pch=21, cex=.5)
+```
+
+```{r balanced XGBoost model}
+# create unlabeled and label datset
+data.balanced.over.nolabels<- data.balanced.over[,-2]
+data.balanced.over.labels <- data.balanced.over[,2]
+
+# transform into matrix
+data.balanced.over.boost.train <- xgb.DMatrix(data=as.matrix(data.balanced.over.nolabels), label=as.matrix(data.balanced.over.labels))
+
+# parameter for model
+params <- list(booster = "gbtree", objective = "binary:logistic", eta=0.3, gamma=0, max_depth=6, min_child_weight=1, subsample=1, colsample_bytree=1)
+
+# cv for nrounds -- best iteration = 15
+xgbcv.over <- xgb.cv( params = params, data = data.balanced.over.boost.train, nrounds = 400, nfold = 5, showsd = T, stratified = T, print.every.n = 10, early.stop.round = 20, maximize = F)
+xgbcv.over$best_iteration
+
+# run full model with cv best nrounds
+xgb.imputed.model2 <- xgboost(params = params, 
+                             data= data.balanced.over.boost.train,
+                            nround = 15)
+
+# test our model on our training data
+tests <- predict(xgb.imputed.model2, complete.boost.test)
+
+# plot roc curveand importance plots
+roc.curve(complete.testing$SeriousDlqin2yrs, tests,main = "Balanced Dataset: AUC = 0.863")
+importance2<- xgb.importance(model = xgb.imputed.model2)
+importance.plot2 <- xgb.plot.importance(importance[1:8], main = "Balanced Dataset XGBoost Variable Importance", left_margin = 15, xlab = "Variable Importance" )
+
+# prepare test data for prediction
+complete.test.imputed.nolabels <- complete.test.imputed[,-2]
+complete.test.imputed.labels <- complete.test.imputed[,2]
+
+# put test data into matrix form 
+data.balanced.over.boost.test <- xgb.DMatrix(data=as.matrix(complete.test.imputed.nolabels), label=as.matrix(complete.test.imputed.labels))
+
+# use model to predict probabilities to be submitted to kaggle 
+probs <- predict(xgb.imputed.model2, data.balanced.over.boost.test)
+
+# preparing final submission 
+sampleEntry <- read.csv("~/Downloads/sampleEntry.csv")
+sampleEntry[,2] <- probs
+write.csv(sampleEntry, 'submission.csv', row.names = FALSE)
+
+```
+
